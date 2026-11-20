@@ -1,381 +1,639 @@
 
-/* My Recipe Companion - Photo to Recipe v4 */
+/*
+ * My Recipe Companion - Photo to Recipe v5
+ * OpenAI Vision via private Cloudflare Worker
+ *
+ * Never put API keys or scanner tokens in this file.
+ */
+
 (() => {
+  "use strict";
+
+  // STEP 1: Replace this with your Worker URL.
+  // Do NOT add /scan at the end.
+  const WORKER_URL =
+    "https://my-recipe-ai.brady1232002.workers.dev/";
+
+  const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+  const MAX_DIMENSION = 1800;
+
   const $ = id => document.getElementById(id);
-  const add = $('add');
-  const home = $('home');
 
-  if (!add || !home || $('photoImportBtn')) return;
+  const add = $("add");
+  const home = $("home");
 
-  const button = document.createElement('button');
-  button.id = 'photoImportBtn';
-  button.className = 'btn alt';
-  button.textContent = '📸 Photo to Recipe';
+  if (!add || !home || $("photoImportBtn")) return;
+
+  let busy = false;
+  let scannerToken = "";
+  let scannedRecipe = null;
+  let previewURL = "";
+
+  const button = document.createElement("button");
+  button.id = "photoImportBtn";
+  button.className = "btn alt";
+  button.textContent = "📸 Photo to Recipe";
   add.after(button);
 
-  const panel = document.createElement('section');
-  panel.id = 'photoImportPanel';
-  panel.className = 'hidden';
+  const panel = document.createElement("section");
+  panel.id = "photoImportPanel";
+  panel.className = "hidden";
 
   panel.innerHTML = `
     <button class="btn alt" id="photoBack">
       ← Cookbook
     </button>
 
-    <h2>📸 Photo to Recipe</h2>
-    <p>Automatically scans recipe cards, cookbook pages,
-    and screenshots.</p>
+    <h2>📸 AI Photo to Recipe</h2>
 
-    <input id="recipeImage" type="file"
-      accept="image/*">
+    <p>
+      Upload a recipe card, cookbook page,
+      or screenshot. AI will organize it
+      into an editable recipe.
+    </p>
 
-    <img id="recipePreview" alt="Recipe preview"
-      style="display:none;width:100%;
-      max-height:350px;object-fit:contain;
-      margin:15px 0;border-radius:12px">
-
-    <button class="btn" id="readPhoto">
-      ✨ Scan Recipe Automatically
-    </button>
-
-    <p id="ocrStatus" role="status"
-      aria-live="polite">Ready to scan.</p>
-
-    <label for="recognizedText">
-      Recognized Recipe Text
+    <label for="recipeImage">
+      Choose recipe image
     </label>
 
-    <textarea id="recognizedText"
-      style="width:100%;min-height:260px">
-    </textarea>
+    <input
+      id="recipeImage"
+      type="file"
+      accept="image/png,image/jpeg,image/webp,image/gif"
+    >
 
-    <button class="btn" id="reviewPhoto">
-      Review in Recipe Editor
-    </button>
+    <img
+      id="recipePreview"
+      alt="Selected recipe image"
+      style="
+        display:none;
+        width:100%;
+        max-height:350px;
+        object-fit:contain;
+        margin:15px 0;
+        border-radius:12px;
+      "
+    >
+
+    <div style="margin:14px 0">
+      <button class="btn" id="readPhoto">
+        ✨ Scan with AI
+      </button>
+    </div>
+
+    <p id="ocrStatus" role="status"
+      aria-live="polite">
+      Choose a photo to begin.
+    </p>
+
+    <div id="aiReview" class="hidden">
+      <h2>Review Your Recipe</h2>
+
+      <p>
+        Check all measurements and instructions
+        against the original image before saving.
+      </p>
+
+      <label for="aiName">Recipe name</label>
+      <input id="aiName" type="text">
+
+      <label for="aiCategory">Category</label>
+      <input id="aiCategory" type="text">
+
+      <label for="aiServings">Servings</label>
+      <input id="aiServings" type="number"
+        min="1" step="1">
+
+      <label for="aiPrep">Prep time (minutes)</label>
+      <input id="aiPrep" type="number"
+        min="0" step="1">
+
+      <label for="aiCook">Cook time (minutes)</label>
+      <input id="aiCook" type="number"
+        min="0" step="1">
+
+      <label for="aiIngredients">
+        Ingredients (one per line)
+      </label>
+      <textarea id="aiIngredients"
+        style="width:100%;min-height:220px">
+      </textarea>
+
+      <label for="aiInstructions">
+        Directions (one step per line)
+      </label>
+      <textarea id="aiInstructions"
+        style="width:100%;min-height:260px">
+      </textarea>
+
+      <label for="aiNotes">Notes and tips</label>
+      <textarea id="aiNotes"
+        style="width:100%;min-height:120px">
+      </textarea>
+
+      <div id="aiWarningsBox"
+        class="hidden"
+        style="
+          margin:15px 0;
+          padding:12px;
+          border:1px solid #b88742;
+          border-radius:10px;
+        ">
+        <strong>Items to double-check</strong>
+        <ul id="aiWarnings"></ul>
+      </div>
+
+      <button class="btn" id="reviewPhoto"
+        style="margin-top:18px">
+        📖 Review in Recipe Editor
+      </button>
+    </div>
   `;
 
-  home.parentNode.insertBefore(panel, home.nextSibling);
+  home.parentNode.insertBefore(
+    panel,
+    home.nextSibling
+  );
 
-  let busy = false;
+  function setStatus(message) {
+    $("ocrStatus").textContent = message;
+  }
 
   function showPanel() {
-    ['home', 'editor', 'detail'].forEach(id => {
-      const el = $(id);
-      if (el) el.classList.add('hidden');
+    ["home", "editor", "detail"].forEach(id => {
+      const element = $(id);
+      if (element) element.classList.add("hidden");
     });
-    panel.classList.remove('hidden');
+
+    panel.classList.remove("hidden");
     window.scrollTo(0, 0);
   }
 
   button.onclick = showPanel;
 
-  $('photoBack').onclick = () => {
-    panel.classList.add('hidden');
-    home.classList.remove('hidden');
+  $("photoBack").onclick = () => {
+    panel.classList.add("hidden");
+    home.classList.remove("hidden");
+    window.scrollTo(0, 0);
   };
 
-  $('recipeImage').onchange = e => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      $('recipePreview').src = reader.result;
-      $('recipePreview').style.display = 'block';
-    };
-    reader.readAsDataURL(file);
-  };
-
-  function loadOCR() {
-    if (window.Tesseract) return Promise.resolve();
-
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src =
-        'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
-      script.onload = resolve;
-      script.onerror = reject;
-      document.head.appendChild(script);
-    });
+  function resetReview() {
+    scannedRecipe = null;
+    $("aiReview").classList.add("hidden");
+    $("aiWarningsBox").classList.add("hidden");
+    $("aiWarnings").replaceChildren();
   }
 
-  function enhanceImage(image, grayscale = false) {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
+  $("recipeImage").onchange = event => {
+    const file = event.target.files?.[0];
 
-    const maxWidth = 2200;
-    const scale = Math.min(
-      1, maxWidth / image.width
-    );
+    resetReview();
 
-    canvas.width = Math.round(image.width * scale);
-    canvas.height = Math.round(image.height * scale);
-
-    ctx.drawImage(
-      image, 0, 0,
-      canvas.width, canvas.height
-    );
-
-    if (grayscale) {
-      const data = ctx.getImageData(
-        0, 0, canvas.width, canvas.height
-      );
-
-      for (let i = 0; i < data.data.length; i += 4) {
-        const gray =
-          data.data[i] * 0.299 +
-          data.data[i + 1] * 0.587 +
-          data.data[i + 2] * 0.114;
-
-        const adjusted = Math.max(
-          0, Math.min(255, (gray - 128) * 1.5 + 128)
-        );
-
-        data.data[i] = adjusted;
-        data.data[i + 1] = adjusted;
-        data.data[i + 2] = adjusted;
-      }
-
-      ctx.putImageData(data, 0, 0);
+    if (previewURL) {
+      URL.revokeObjectURL(previewURL);
+      previewURL = "";
     }
 
-    return canvas;
-  }
+    if (!file) {
+      $("recipePreview").style.display = "none";
+      setStatus("Choose a photo to begin.");
+      return;
+    }
 
-  function cropCanvas(source, x, y, w, h) {
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
+    previewURL = URL.createObjectURL(file);
+    $("recipePreview").src = previewURL;
+    $("recipePreview").style.display = "block";
 
-    canvas.getContext('2d').drawImage(
-      source, x, y, w, h,
-      0, 0, w, h
-    );
-
-    return canvas;
-  }
+    setStatus("Photo selected. Ready to scan.");
+  };
 
   function loadImage(file) {
     return new Promise((resolve, reject) => {
-      const img = new Image();
+      const image = new Image();
       const url = URL.createObjectURL(file);
 
-      img.onload = () => {
+      image.onload = () => {
         URL.revokeObjectURL(url);
-        resolve(img);
+        resolve(image);
       };
 
-      img.onerror = () => {
+      image.onerror = () => {
         URL.revokeObjectURL(url);
-        reject(new Error('Could not read image'));
+        reject(new Error(
+          "Could not open this image."
+        ));
       };
 
-      img.src = url;
+      image.src = url;
     });
   }
 
-  function normalizeText(text) {
-    return text
-      .replace(/\r/g, '')
-      .replace(/[ \t]+/g, ' ')
-      .replace(/(\d)\s*\/\s*(\d)/g, '$1/$2')
-      .replace(/½/g, '1/2')
-      .replace(/¼/g, '1/4')
-      .replace(/¾/g, '3/4')
-      .replace(/⅓/g, '1/3')
-      .replace(/⅔/g, '2/3')
-      .replace(/⅛/g, '1/8')
-      .trim();
+  function canvasToBlob(canvas, quality) {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(blob => {
+        if (blob) resolve(blob);
+        else reject(new Error(
+          "Could not prepare the image."
+        ));
+      }, "image/jpeg", quality);
+    });
   }
 
-  function scoreText(text) {
-    const words = text.match(/[a-z]{3,}/gi) || [];
-    const keywords = text.match(
-      /ingredients|directions|instructions|cup|tsp|tbsp|bake|oven|chicken|cheese/gi
-    ) || [];
+  function blobToDataURL(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
 
-    return words.length + keywords.length * 8;
+      reader.onload = () =>
+        resolve(reader.result);
+
+      reader.onerror = () =>
+        reject(new Error(
+          "Could not encode the image."
+        ));
+
+      reader.readAsDataURL(blob);
+    });
   }
 
-  $('readPhoto').onclick = async () => {
-    const file = $('recipeImage').files[0];
+  async function prepareImage(file) {
+    const image = await loadImage(file);
 
-    if (!file || busy) {
-      if (!file) alert('Choose a photo first.');
+    const scale = Math.min(
+      1,
+      MAX_DIMENSION / Math.max(
+        image.naturalWidth,
+        image.naturalHeight
+      )
+    );
+
+    const canvas = document.createElement("canvas");
+
+    canvas.width = Math.max(
+      1,
+      Math.round(image.naturalWidth * scale)
+    );
+
+    canvas.height = Math.max(
+      1,
+      Math.round(image.naturalHeight * scale)
+    );
+
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      throw new Error("Canvas is unavailable.");
+    }
+
+    // White background prevents transparent
+    // recipe cards from turning black.
+    context.fillStyle = "#ffffff";
+    context.fillRect(
+      0, 0,
+      canvas.width,
+      canvas.height
+    );
+
+    context.drawImage(
+      image,
+      0, 0,
+      canvas.width,
+      canvas.height
+    );
+
+    // Try progressively smaller JPEG files.
+    for (const quality of [0.9, 0.8, 0.65, 0.5]) {
+      const blob = await canvasToBlob(
+        canvas,
+        quality
+      );
+
+      if (blob.size <= MAX_IMAGE_BYTES) {
+        return blobToDataURL(blob);
+      }
+    }
+
+    throw new Error(
+      "Image is too large. Try a smaller photo."
+    );
+  }
+
+  function listToText(value) {
+    if (Array.isArray(value)) {
+      return value.map(String).join("\n");
+    }
+
+    return typeof value === "string"
+      ? value
+      : "";
+  }
+
+  function fieldValue(value) {
+    return value === null ||
+      value === undefined
+      ? ""
+      : String(value);
+  }
+
+  function showReview(recipe) {
+    scannedRecipe = recipe;
+
+    $("aiName").value = fieldValue(
+      recipe.name
+    );
+
+    $("aiCategory").value = fieldValue(
+      recipe.category || "Dinner"
+    );
+
+    $("aiServings").value = fieldValue(
+      recipe.servings
+    );
+
+    $("aiPrep").value = fieldValue(
+      recipe.prep
+    );
+
+    $("aiCook").value = fieldValue(
+      recipe.cook
+    );
+
+    $("aiIngredients").value = listToText(
+      recipe.ingredients
+    );
+
+    $("aiInstructions").value = listToText(
+      recipe.instructions
+    );
+
+    $("aiNotes").value = listToText(
+      recipe.notes
+    );
+
+    const warnings = Array.isArray(
+      recipe.warnings
+    ) ? recipe.warnings : [];
+
+    const warningList = $("aiWarnings");
+    warningList.replaceChildren();
+
+    for (const warning of warnings) {
+      const item = document.createElement("li");
+      item.textContent = String(warning);
+      warningList.appendChild(item);
+    }
+
+    $("aiWarningsBox").classList.toggle(
+      "hidden",
+      warnings.length === 0
+    );
+
+    $("aiReview").classList.remove("hidden");
+
+    setStatus(
+      "Scan complete! Review the recipe below."
+    );
+
+    $("aiReview").scrollIntoView({
+      behavior: "smooth",
+      block: "start"
+    });
+  }
+
+  async function readError(response) {
+    let details = {};
+
+    try {
+      details = await response.json();
+    } catch {
+      // Server may return an empty response.
+    }
+
+    if (response.status === 401) {
+      scannerToken = "";
+
+      throw new Error(
+        "Scanner password rejected. " +
+        "Try scanning again with the correct password."
+      );
+    }
+
+    if (details.upstreamStatus) {
+      throw new Error(
+        "OpenAI request failed (status " +
+        details.upstreamStatus + ")."
+      );
+    }
+
+    throw new Error(
+      details.error ||
+      "Scanner request failed (HTTP " +
+      response.status + ")."
+    );
+  }
+
+  $("readPhoto").onclick = async () => {
+    if (busy) return;
+
+    const file = $("recipeImage").files?.[0];
+
+    if (!file) {
+      alert("Choose a recipe photo first.");
       return;
+    }
+
+    if (WORKER_URL.includes("YOUR-WORKER")) {
+      setStatus(
+        "Configure your Cloudflare Worker URL first."
+      );
+      return;
+    }
+
+    if (!scannerToken) {
+      const entered = window.prompt(
+        "Enter your private scanner test password.\n" +
+        "Do not enter your OpenAI API key."
+      );
+
+      if (entered === null) return;
+
+      scannerToken = entered.trim();
+
+      if (!scannerToken) {
+        setStatus("Scanner password is required.");
+        return;
+      }
     }
 
     busy = true;
-    $('readPhoto').disabled = true;
-
-    let worker;
+    $("readPhoto").disabled = true;
+    resetReview();
 
     try {
-      $('ocrStatus').textContent =
-        'Preparing automatic scanner...';
+      setStatus("Preparing your recipe photo...");
 
-      await loadOCR();
+      const image = await prepareImage(file);
 
-      const image = await loadImage(file);
-      const original = enhanceImage(image, false);
-      const enhanced = enhanceImage(image, true);
-
-      worker = await Tesseract.createWorker('eng');
-
-      async function recognize(canvas, label) {
-        $('ocrStatus').textContent = label;
-        const result = await worker.recognize(canvas);
-        return normalizeText(result.data.text);
-      }
-
-      // First pass: original full image
-      const fullText = await recognize(
-        original, 'Reading original image...'
+      setStatus(
+        "AI is reading ingredients and directions..."
       );
 
-      // Second pass: enhanced full image
-      const enhancedText = await recognize(
-        enhanced, 'Enhancing and reading text...'
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        90000
       );
 
-      let bestText = scoreText(enhancedText) >
-        scoreText(fullText) ? enhancedText : fullText;
+      let response;
 
-      // Detect possible two-column recipe layout.
-      // Run separate OCR on each half, then compare.
-      if (original.width > original.height * 1.15) {
-        const mid = Math.round(original.width / 2);
-
-        const left = cropCanvas(
-          enhanced, 0, 0, mid, enhanced.height
+      try {
+        response = await fetch(
+          WORKER_URL.replace(/\/+$/, "") + "/scan",
+          {
+            method: "POST",
+            headers: {
+              "Authorization":
+                "Bearer " + scannerToken,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ image }),
+            signal: controller.signal,
+            cache: "no-store"
+          }
         );
-
-        const right = cropCanvas(
-          enhanced, mid, 0,
-          enhanced.width - mid, enhanced.height
-        );
-
-        const leftText = await recognize(
-          left, 'Reading left recipe section...'
-        );
-
-        const rightText = await recognize(
-          right, 'Reading right recipe section...'
-        );
-
-        const columnText = leftText + '\n\n' + rightText;
-
-        if (scoreText(columnText) > scoreText(bestText)) {
-          bestText = columnText;
-        }
+      } finally {
+        clearTimeout(timeout);
       }
 
-      $('recognizedText').value = bestText;
-      $('ocrStatus').textContent =
-        'Scan complete! Check the text below.';
+      if (!response.ok) {
+        await readError(response);
+      }
+
+      const result = await response.json();
+
+      if (!result.success || !result.recipe) {
+        throw new Error(
+          "The scanner returned no recipe."
+        );
+      }
+
+      showReview(result.recipe);
 
     } catch (error) {
-      console.error(error);
-      $('ocrStatus').textContent =
-        'Scanning failed. Try another image.';
+      console.error("AI recipe scan:", error);
+
+      if (error.name === "AbortError") {
+        setStatus(
+          "Scanning timed out. Please try again."
+        );
+      } else {
+        setStatus(
+          "Scan failed: " + error.message
+        );
+      }
     } finally {
-      if (worker) await worker.terminate();
       busy = false;
-      $('readPhoto').disabled = false;
+      $("readPhoto").disabled = false;
     }
   };
 
-  function parseRecipe(text) {
-    const lines = normalizeText(text)
-      .split('\n')
-      .map(line => line.trim())
-      .filter(Boolean);
+  function setEditorField(id, value) {
+    const element = $(id);
+    if (!element) return;
 
-    const recipe = {
-      name: '',
-      ingredients: [],
-      instructions: [],
-      notes: []
-    };
+    if (element.tagName === "SELECT") {
+      const matchingOption = Array.from(
+        element.options
+      ).find(option =>
+        option.value.toLowerCase() ===
+        String(value).toLowerCase() ||
+        option.textContent.trim().toLowerCase() ===
+        String(value).toLowerCase()
+      );
 
-    let mode = 'title';
-
-    for (const line of lines) {
-      if (/^ingredients\s*:?$/i.test(line)) {
-        mode = 'ingredients';
-        continue;
+      if (matchingOption) {
+        element.value = matchingOption.value;
       }
-
-      if (/^(directions|instructions|method|steps)\s*:?$/i.test(line)) {
-        mode = 'instructions';
-        continue;
-      }
-
-      if (/^(tips|notes|nutrition)\s*:?$/i.test(line)) {
-        mode = 'notes';
-        continue;
-      }
-
-      if (/^(chicken crust|toppings|filling|sauce)\s*:?$/i.test(line)) {
-        if (mode === 'ingredients') {
-          recipe.ingredients.push('--- ' + line + ' ---');
-        }
-        continue;
-      }
-
-      if (mode === 'title') {
-        if (!recipe.name) recipe.name = line;
-        continue;
-      }
-
-      const cleaned = line.replace(
-        /^(?:[-*•]|\d+[.)])\s*/, ''
-      ).trim();
-
-      if (!cleaned) continue;
-
-      if (mode === 'ingredients') {
-        recipe.ingredients.push(cleaned);
-      } else if (mode === 'instructions') {
-        recipe.instructions.push(cleaned);
-      } else {
-        recipe.notes.push(cleaned);
-      }
+    } else {
+      element.value = value;
     }
 
-    return recipe;
+    element.dispatchEvent(
+      new Event("input", { bubbles: true })
+    );
+
+    element.dispatchEvent(
+      new Event("change", { bubbles: true })
+    );
   }
 
-  $('reviewPhoto').onclick = () => {
-    const text = $('recognizedText').value.trim();
-
-    if (!text) {
-      alert('Scan a recipe photo first.');
+  $("reviewPhoto").onclick = () => {
+    if (!scannedRecipe) {
+      alert("Scan a recipe first.");
       return;
     }
 
-    const recipe = parseRecipe(text);
+    const name = $("aiName").value.trim();
+    const ingredients =
+      $("aiIngredients").value.trim();
+    const instructions =
+      $("aiInstructions").value.trim();
 
-    panel.classList.add('hidden');
-    add.click();
-
-    $('name').value = recipe.name;
-    $('ingredients').value =
-      recipe.ingredients.join('\n');
-    $('instructions').value =
-      recipe.instructions.join('\n');
-
-    $('notes').value = recipe.notes.join('\n');
-
-    if (!recipe.ingredients.length ||
-        !recipe.instructions.length) {
-      $('notes').value +=
-        '\n\nOriginal scanned text:\n' + text;
+    if (!name || !ingredients || !instructions) {
+      alert(
+        "Recipe name, ingredients, and " +
+        "directions are required."
+      );
+      return;
     }
 
-    $('editTitle').textContent =
-      'Review Scanned Recipe';
+    // Open the existing cookbook editor first.
+    panel.classList.add("hidden");
+    add.click();
+
+    // Then populate its existing fields.
+    setEditorField("name", name);
+
+    setEditorField(
+      "category",
+      $("aiCategory").value.trim()
+    );
+
+    setEditorField(
+      "servings",
+      $("aiServings").value
+    );
+
+    setEditorField(
+      "prep",
+      $("aiPrep").value
+    );
+
+    setEditorField(
+      "cook",
+      $("aiCook").value
+    );
+
+    setEditorField(
+      "ingredients",
+      ingredients
+    );
+
+    setEditorField(
+      "instructions",
+      instructions
+    );
+
+    setEditorField(
+      "notes",
+      $("aiNotes").value.trim()
+    );
+
+    if ($("editTitle")) {
+      $("editTitle").textContent =
+        "Review Scanned Recipe";
+    }
 
     window.scrollTo(0, 0);
   };
+
 })();
